@@ -1,0 +1,9 @@
+PS C:\Users\Braeden Zarikoff\OneDrive\Documents\VSCode_Projects\Compute> .\naie_gemm.exe 512
+GEMM: N = 512, CPU verification: on
+Kernel time: 0.108 ms | Throughput: 2494.38 GFLOPS
+CPU reference time: 197.649 ms
+Verification passed. Max abs error: 2.622604e-06
+PS C:\Users\Braeden Zarikoff\OneDrive\Documents\VSCode_Projects\Compute> .\naie_gemm.exe 2048
+GEMM: N = 2048, CPU verification: off (N too large)
+Kernel time: 4.620 ms | Throughput: 3718.90 GFLOPS
+Skipping CPU check at this size. Run with a smaller N (e.g. 256 or 512) to verify correctness first.
