@@ -11,6 +11,11 @@
 #include <chrono>
 #include <cuda_runtime.h>
 
+
+const static int TILE_SIZE = 16;
+
+#define sharedMemOn 0
+
 #define CUDA_CHECK(call)                                                    \
     do {                                                                    \
         cudaError_t err = (call);                                           \
@@ -22,20 +27,39 @@
     } while (0)
 
 // -----------------------------------------------------------------------
-// Naive kernel: one thread computes one output element.
-// Every thread re-reads a full row of A and a full column of B from
-// global memory -> lots of redundant traffic. This is the thing you'll
-// fix in step 2 with shared memory tiling.
+// Added shared memory
 // -----------------------------------------------------------------------
-__global__ void gemm_naive(const float* A, const float* B, float* C, int N) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void gemm_shared_mem(const float* A, const float* B, float* C, int N) {
+
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    float acc = 0.0f;
+
+    int numTiles = (N + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; ++t) {
+        int a_col = t * TILE_SIZE + threadIdx.x;   // column within A's tile
+        int b_row = t * TILE_SIZE + threadIdx.y;   // row within B's tile
+
+        // Each thread loads exactly one element of each tile into shared memory
+        As[threadIdx.y][threadIdx.x] = (row < N && a_col < N) ? A[row * N + a_col] : 0.0f;
+        Bs[threadIdx.y][threadIdx.x] = (b_row < N && col < N) ? B[b_row * N + col] : 0.0f;
+
+        __syncthreads(); // wait until the whole tile is loaded
+
+        // Partial dot product using only shared memory (fast, reused across threads)
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads(); // wait until everyone's done reading before next tile overwrites it
+    }
 
     if (row < N && col < N) {
-        float acc = 0.0f;
-        for (int k = 0; k < N; ++k) {
-            acc += A[row * N + k] * B[k * N + col];
-        }
         C[row * N + col] = acc;
     }
 }
@@ -103,12 +127,12 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
 
-    dim3 blockDim(16, 16);
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (N + blockDim.y - 1) / blockDim.y);
 
     // Warm-up launch (first launch pays JIT/context setup cost)
-    gemm_naive<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
+    gemm_shared_mem<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Timed run
@@ -117,7 +141,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&stop));
 
     CUDA_CHECK(cudaEventRecord(start));
-    gemm_naive<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
+    gemm_shared_mem<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
 
