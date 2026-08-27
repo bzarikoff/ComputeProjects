@@ -1,0 +1,12 @@
+Yes — just point ncu at whichever exe you want, same command structure, different target binary and output filename so you don't overwrite the first report:
+
+
+& "C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.0\target\windows-desktop-win7-x64\ncu.exe" --set full -o naive_gemm_profile .\naive_gemm.exe 1024
+or for the shared-memory-only version:
+
+
+& "C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.1.0\target\windows-desktop-win7-x64\ncu.exe" --set full -o sharedMem_gemm_profile .\sharedMem_gemm.exe 1024
+Same rules apply as before:
+
+Run from an elevated (Administrator) terminal, or you'll hit ERR_NVGPUCTRPERM again.
+Each exe launches its kernel twice (warm-up + timed), so each .ncu-rep will again contain two result sets — the second one is the timed run you care about. Add --launch-skip 1 --launch-count 1 if you only want that one captured.
