@@ -67,12 +67,13 @@ Compare against `rocblas_sgemm` the same way you compared against cuBLAS.
 
 Capture a table like:
 
-| Kernel          | N=1024 GFLOPS | vs cuBLAS |
-|-----------------|---------------|-----------|
-| Naive           |               |           |
-| Tiled           |               |           |
-| Tiled + tuned   |               |           |
-| cuBLAS          |               | 100%      |
+| Kernel                          | N=1024 GFLOPS | vs cuBLAS |
+|---------------------------------|---------------|-----------|
+| Naive                           | 2070.30       | 14.7%     |
+| Tiled (shared memory)           | 2699.04       | 19.2%     |
+| Tiled + register reuse (TILE=16)| 5777.28       | 41.0%     |
+| Tiled + register reuse (TILE=32)| 5020.86       | 35.7%     |
+| cuBLAS                          | 14080.75      | 100%      |
 
 Plus 2-3 Nsight Compute screenshots showing the occupancy/memory-throughput
 improvement across versions. This table + narrative is what goes on a resume

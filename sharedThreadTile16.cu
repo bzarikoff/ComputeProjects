@@ -12,7 +12,7 @@
 #include <cuda_runtime.h>
 
 #define TM 4  // each thread computes TM output rows instead of 1
-const static int TILE_SIZE = 32;
+const static int TILE_SIZE = 16;
 
 #define sharedMemOn 0
 
