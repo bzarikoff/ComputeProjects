@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Occupancy vs Tile Size</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --series-1:       #2a78d6; /* threads */
+    --series-2:       #eb6834; /* registers */
+    --series-3:       #1baf7a; /* shared memory */
+    --series-4:       #eda100; /* hardware cap */
+    --occ-line:       #256abf; /* sequential blue, step 500 */
+    --occ-fill:       #cde2fb; /* sequential blue, step 100 */
+    --tested-mark:    #e34948;
+    --border:         rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --baseline:       #383835;
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --series-4:       #c98500;
+      --occ-line:       #6da7ec;
+      --occ-fill:       #184f95;
+      --tested-mark:    #e66767;
+      --border:         rgba(255,255,255,0.10);
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --series-4:       #c98500;
+    --occ-line:       #6da7ec;
+    --occ-fill:       #184f95;
+    --tested-mark:    #e66767;
+    --border:         rgba(255,255,255,0.10);
+  }
+
+  .viz-root {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px;
+    box-sizing: border-box;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  h1 { font-size: 19px; font-weight: 650; margin: 0 0 2px 0; }
+  .sub { font-size: 13px; color: var(--text-secondary); margin: 0 0 4px 0; line-height: 1.5; }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px 12px 20px;
+    box-sizing: border-box;
+  }
+  .card h2 { font-size: 14px; font-weight: 650; margin: 0 0 2px 0; }
+  .card .note { font-size: 12px; color: var(--text-muted); margin: 0 0 10px 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-secondary); margin: 8px 0 0 4px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .swatch.dot { width: 9px; height: 9px; border-radius: 50%; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .axis-label { fill: var(--text-muted); font-size: 10.5px; }
+  .axis-title { fill: var(--text-secondary); font-size: 11px; }
+  .line-path { fill: none; stroke-width: 2; }
+  .marker { stroke: var(--surface-1); stroke-width: 1.5; }
+  .tested-band { fill: var(--text-muted); opacity: 0.06; }
+  .tested-label { fill: var(--text-muted); font-size: 10px; font-weight: 600; }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11.5px;
+    color: var(--text-primary);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    opacity: 0;
+    transition: opacity 0.08s;
+    white-space: nowrap;
+    z-index: 5;
+  }
+  .tooltip .row { display: flex; justify-content: space-between; gap: 14px; }
+  .tooltip .row + .row { margin-top: 2px; }
+  .tooltip .k { color: var(--text-secondary); }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0; }
+  .hit { fill: transparent; cursor: crosshair; }
+  .chart-pos { position: relative; }
+  footer { font-size: 11px; color: var(--text-muted); line-height: 1.6; margin-top: 4px; }
+  .formula-block {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .formula-block .c { color: var(--text-muted); }
+  .const-list { font-size: 12px; color: var(--text-secondary); margin: 10px 0 0 0; line-height: 1.7; }
+  .const-list code { font-family: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace; color: var(--text-primary); }
+</style>
+</head>
+<body>
+
+<div class="viz-root">
+  <div class="wrap">
+    <div>
+      <h1>Occupancy vs. TILE_SIZE</h1>
+      <p class="sub">Theoretical model for <code>gemm_thread_tile</code> (TM=4) on an RTX&nbsp;3080&nbsp;Ti &mdash; 44 regs/thread, 65536 regs/SM, 1536 threads/SM, 16 max resident blocks/SM. TILE_SIZE 8 / 16 / 32 are the values actually built and benchmarked; the rest is the same formula extended across the full valid range.</p>
+    </div>
+
+    <div class="card">
+      <h2>Resident warps admitted, by limiting resource</h2>
+      <p class="note">Each line = how many warps would fit under that ONE resource alone (blocks admitted &times; warps/block). The lowest line at a given TILE_SIZE is the actual binding constraint &mdash; and it's what feeds directly into Chart 2's occupancy. Raw block count alone (not shown here) is misleading: small tiles admit many thin blocks, large tiles admit few fat ones, so block count and occupancy don't rank the same way.</p>
+      <div class="chart-pos" id="chart1"></div>
+      <div class="legend" id="legend1"></div>
+    </div>
+
+    <div class="card">
+      <h2>Resulting occupancy</h2>
+      <p class="note">Occupancy = (blocks admitted &times; warps/block) / 48 max warps per SM. Red dots mark the three TILE_SIZE values actually compiled and run.</p>
+      <div class="chart-pos" id="chart2"></div>
+    </div>
+
+    <div class="card">
+      <h2>Formulas used</h2>
+      <p class="note">T = TILE_SIZE. All block-count terms are floored (a block only admits if it fully fits).</p>
+      <div class="formula-block"><span class="c">// per-block resource cost</span>
+threads(T)         = T * T
+warpsPerBlock(T)   = ceil( threads(T) / 32 )
+threadsRounded(T)  = warpsPerBlock(T) * 32        <span class="c">// SM reserves whole warp slots</span>
+smemBytes(T)       = 4 * T * T * (TM + 1)         <span class="c">// As[T*TM][T] + Bs[T][T], 4 bytes/float</span>
+
+<span class="c">// max blocks admitted under EACH resource alone</span>
+bThreads(T) = floor( threadsPerSM   / threadsRounded(T) )
+bRegs(T)    = floor( regsPerSM      / (regsPerThread * threadsRounded(T)) )
+bSmem(T)    = floor( smemPerBlock   / smemBytes(T) )
+bHw         = maxBlocksPerSM                      <span class="c">// flat hardware cap, independent of T</span>
+
+<span class="c">// binding constraint = smallest of the four</span>
+b(T) = min( bThreads(T), bRegs(T), bSmem(T), bHw )
+
+<span class="c">// Chart 1 plots each limiter in WARP terms (not raw blocks) --</span>
+<span class="c">// this is what's actually comparable to the 48-warp/SM ceiling:</span>
+wThreads(T) = bThreads(T) * warpsPerBlock(T)
+wRegs(T)    = bRegs(T)    * warpsPerBlock(T)
+wSmem(T)    = bSmem(T)    * warpsPerBlock(T)
+wHw(T)      = bHw         * warpsPerBlock(T)
+
+<span class="c">// Chart 2: resulting occupancy</span>
+occupancy(T) = ( b(T) * warpsPerBlock(T) / maxWarpsPerSM ) * 100%
+
+<span class="c">// Why wThreads/wRegs zigzag instead of declining smoothly:</span>
+<span class="c">// both reduce to the same sawtooth shape, floor(ceiling / w) * w,</span>
+<span class="c">// where w = warpsPerBlock. It only touches "ceiling" when w divides</span>
+<span class="c">// evenly into it; otherwise flooring wastes some of the budget.</span>
+wThreads as f(w) = floor( 48    / w ) * w    <span class="c">// ceiling = maxWarpsPerSM</span>
+wRegs    as f(w) = floor( 46.5  / w ) * w    <span class="c">// ceiling = regsPerSM / (regsPerThread * 32)</span></div>
+      <p class="const-list">
+        Constants used (this GPU, this kernel):
+        <code>TM=4</code>, <code>regsPerThread=44</code>, <code>regsPerSM=65536</code>,
+        <code>threadsPerSM=1536</code>, <code>maxWarpsPerSM=48</code>,
+        <code>smemPerBlock=49152</code> bytes, <code>maxBlocksPerSM=16</code>.
+        Register count confirmed via <code>nvcc -arch=sm_86 -Xptxas -v</code>;
+        the rest via <code>cudaGetDeviceProperties</code>.
+      </p>
+    </div>
+
+    <footer>
+      Model assumes ~constant register usage across TILE_SIZE (confirmed empirically: 44 at TILE_SIZE=16, 44 at 32, 47 at 8). Non-multiple-of-32 thread counts round up to full warp slots, which is why a few odd TILE_SIZE values show local dips. This is a simplified model of block admission &mdash; Nsight Compute's measured occupancy (e.g. 73% at TILE_SIZE=16 vs this model's 83.3%) differs slightly due to real register allocation granularity the model doesn't capture.
+    </footer>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ---- compute the same data as the theoretical model ----
+  const TM = 4, R = 44, regsSM = 65536, threadsSM = 1536, smemBlock = 49152, hwCap = 16, warpSize = 32, maxWarps = 48;
+  const tested = new Set([8, 16, 32]);
+  const data = [];
+  for (let T = 4; T <= 32; T++) {
+    const threads = T * T;
+    if (threads > 1024) continue;
+    const warpsPerBlock = Math.ceil(threads / warpSize);
+    const threadsRounded = warpsPerBlock * warpSize;
+    const smem = 4 * T * T * (TM + 1);
+    const bThreads = Math.floor(threadsSM / threadsRounded);
+    const bRegs = Math.floor(regsSM / (R * threadsRounded));
+    const bSmem = Math.floor(smemBlock / smem);
+    const b = Math.min(bThreads, bRegs, bSmem, hwCap);
+    const occ = (b * warpsPerBlock / maxWarps) * 100;
+    // Warp-equivalent of each limiter: blocks-admitted-under-that-limit-alone x warps/block.
+    // This is what actually determines occupancy -- raw block count alone does not,
+    // since warps/block itself scales with T (small tiles = many thin blocks,
+    // large tiles = few fat blocks).
+    const wThreads = bThreads * warpsPerBlock;
+    const wRegs = bRegs * warpsPerBlock;
+    const wSmem = bSmem * warpsPerBlock;
+    const wHw = hwCap * warpsPerBlock;
+    data.push({ T, bThreads, bRegs, bSmem, hwCap, b, occ, warpsPerBlock,
+                wThreads, wRegs, wSmem, wHw, tested: tested.has(T) });
+  }
+
+  const root = document.querySelector('.viz-root');
+  function cssVar(name) { return getComputedStyle(root).getPropertyValue(name).trim(); }
+
+  // ---- shared SVG line-chart builder ----
+  function buildChart(container, series, opts) {
+    const W = 860, H = opts.height || 260, padL = 44, padR = 16, padT = 14, padB = 30;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const xs = data.map(d => d.T);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs);
+    const yMax = opts.yMax;
+    const x = T => padL + ((T - xMin) / (xMax - xMin)) * plotW;
+    const y = v => padT + plotH - (v / yMax) * plotH;
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', opts.aria || '');
+
+    const clipId = 'clip-' + Math.random().toString(36).slice(2);
+    const defs = document.createElementNS(svgNS, 'defs');
+    const clipPath = document.createElementNS(svgNS, 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipRect = document.createElementNS(svgNS, 'rect');
+    clipRect.setAttribute('x', padL);
+    clipRect.setAttribute('y', padT);
+    clipRect.setAttribute('width', plotW);
+    clipRect.setAttribute('height', plotH);
+    clipPath.appendChild(clipRect);
+    defs.appendChild(clipPath);
+    svg.appendChild(defs);
+
+    const plotGroup = document.createElementNS(svgNS, 'g');
+    plotGroup.setAttribute('clip-path', `url(#${clipId})`);
+
+    // tested-tile shaded bands
+    [8, 16, 32].forEach(T => {
+      const bx = x(T);
+      const band = document.createElementNS(svgNS, 'rect');
+      band.setAttribute('class', 'tested-band');
+      band.setAttribute('x', bx - 6);
+      band.setAttribute('y', padT);
+      band.setAttribute('width', 12);
+      band.setAttribute('height', plotH);
+      svg.appendChild(band);
+    });
+
+    // gridlines (y)
+    const ticks = opts.yTicks;
+    ticks.forEach(t => {
+      const gy = y(t);
+      const line = document.createElementNS(svgNS, 'line');
+      line.setAttribute('class', 'grid-line');
+      line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+      line.setAttribute('y1', gy); line.setAttribute('y2', gy);
+      svg.appendChild(line);
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'axis-label');
+      lbl.setAttribute('x', padL - 8); lbl.setAttribute('y', gy + 3.5);
+      lbl.setAttribute('text-anchor', 'end');
+      lbl.textContent = opts.yFmt ? opts.yFmt(t) : t;
+      svg.appendChild(lbl);
+    });
+
+    // baseline
+    const base = document.createElementNS(svgNS, 'line');
+    base.setAttribute('class', 'baseline');
+    base.setAttribute('x1', padL); base.setAttribute('x2', W - padR);
+    base.setAttribute('y1', padT + plotH); base.setAttribute('y2', padT + plotH);
+    svg.appendChild(base);
+
+    // optional reference line (e.g. the hard 48-warp/SM ceiling)
+    if (opts.refLine) {
+      const ry = y(opts.refLine.value);
+      const rline = document.createElementNS(svgNS, 'line');
+      rline.setAttribute('x1', padL); rline.setAttribute('x2', W - padR);
+      rline.setAttribute('y1', ry); rline.setAttribute('y2', ry);
+      rline.setAttribute('stroke', cssVar('--text-muted'));
+      rline.setAttribute('stroke-width', 1.25);
+      rline.setAttribute('stroke-dasharray', '5 4');
+      svg.appendChild(rline);
+      const rlbl = document.createElementNS(svgNS, 'text');
+      rlbl.setAttribute('class', 'axis-label');
+      rlbl.setAttribute('x', W - padR); rlbl.setAttribute('y', ry - 5);
+      rlbl.setAttribute('text-anchor', 'end');
+      rlbl.textContent = opts.refLine.label;
+      svg.appendChild(rlbl);
+    }
+
+    // x-axis labels
+    [4, 8, 12, 16, 20, 24, 28, 32].forEach(T => {
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'axis-label');
+      lbl.setAttribute('x', x(T)); lbl.setAttribute('y', padT + plotH + 18);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.textContent = T;
+      svg.appendChild(lbl);
+    });
+    const xTitle = document.createElementNS(svgNS, 'text');
+    xTitle.setAttribute('class', 'axis-title');
+    xTitle.setAttribute('x', padL + plotW / 2); xTitle.setAttribute('y', H - 2);
+    xTitle.setAttribute('text-anchor', 'middle');
+    xTitle.textContent = 'TILE_SIZE';
+    svg.appendChild(xTitle);
+
+    // tested labels along top
+    [8, 16, 32].forEach(T => {
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'tested-label');
+      lbl.setAttribute('x', x(T)); lbl.setAttribute('y', padT - 3);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.textContent = 'tested';
+      svg.appendChild(lbl);
+    });
+
+    // series lines + markers
+    series.forEach(s => {
+      let d = '';
+      data.forEach((row, i) => {
+        const px = x(row.T), py = y(s.get(row));
+        d += (i === 0 ? 'M' : 'L') + px.toFixed(2) + ' ' + py.toFixed(2) + ' ';
+      });
+      const path = document.createElementNS(svgNS, 'path');
+      path.setAttribute('class', 'line-path');
+      path.setAttribute('d', d);
+      path.setAttribute('stroke', s.color);
+      if (s.fill) {
+        const area = document.createElementNS(svgNS, 'path');
+        const dArea = d + `L ${x(xMax).toFixed(2)} ${y(0).toFixed(2)} L ${x(xMin).toFixed(2)} ${y(0).toFixed(2)} Z`;
+        area.setAttribute('d', dArea);
+        area.setAttribute('fill', s.fill);
+        area.setAttribute('opacity', '0.5');
+        plotGroup.appendChild(area);
+      }
+      plotGroup.appendChild(path);
+
+      data.forEach(row => {
+        const val = s.get(row);
+        const r = document.createElementNS(svgNS, 'circle');
+        const isTestedPoint = s.markTested && row.tested;
+        r.setAttribute('class', 'marker');
+        r.setAttribute('cx', x(row.T));
+        r.setAttribute('cy', y(val));
+        r.setAttribute('r', isTestedPoint ? 5 : 2.5);
+        r.setAttribute('fill', isTestedPoint ? cssVar('--tested-mark') : s.color);
+        plotGroup.appendChild(r);
+      });
+    });
+    svg.appendChild(plotGroup);
+
+    // direct value labels at the tested TILE_SIZE points, anchored to the
+    // lowest (binding) series at that point so the answer is readable without hovering
+    if (opts.valueLabels) {
+      data.filter(row => row.tested).forEach(row => {
+        const vals = series.map(s => s.get(row));
+        const minVal = Math.min(...vals);
+        const clampedY = Math.max(padT + 10, y(minVal));
+        const lbl = document.createElementNS(svgNS, 'text');
+        lbl.setAttribute('x', x(row.T));
+        lbl.setAttribute('y', clampedY - 10);
+        lbl.setAttribute('text-anchor', 'middle');
+        lbl.setAttribute('font-size', '11px');
+        lbl.setAttribute('font-weight', '650');
+        lbl.setAttribute('fill', cssVar('--text-primary'));
+        lbl.textContent = opts.valueLabels(row);
+        svg.appendChild(lbl);
+      });
+    }
+
+    // hover crosshair + tooltip
+    const crosshair = document.createElementNS(svgNS, 'line');
+    crosshair.setAttribute('class', 'crosshair');
+    crosshair.setAttribute('y1', padT); crosshair.setAttribute('y2', padT + plotH);
+    svg.appendChild(crosshair);
+
+    const hit = document.createElementNS(svgNS, 'rect');
+    hit.setAttribute('class', 'hit');
+    hit.setAttribute('x', padL); hit.setAttribute('y', padT);
+    hit.setAttribute('width', plotW); hit.setAttribute('height', plotH);
+    svg.appendChild(hit);
+
+    container.style.position = 'relative';
+    container.appendChild(svg);
+
+    const tip = document.createElement('div');
+    tip.className = 'tooltip';
+    container.appendChild(tip);
+
+    function handleMove(evt) {
+      const rect = svg.getBoundingClientRect();
+      const scale = W / rect.width;
+      const mx = (evt.clientX - rect.left) * scale;
+      const relX = (mx - padL) / plotW;
+      let T = Math.round(xMin + relX * (xMax - xMin));
+      T = Math.max(xMin, Math.min(xMax, T));
+      const row = data.find(d => d.T === T);
+      if (!row) return;
+      crosshair.setAttribute('x1', x(T));
+      crosshair.setAttribute('x2', x(T));
+      crosshair.style.opacity = 1;
+
+      tip.innerHTML = opts.tooltip(row);
+      tip.style.opacity = 1;
+      const cRect = container.getBoundingClientRect();
+      let left = (evt.clientX - cRect.left) + 14;
+      let top = (evt.clientY - cRect.top) - 10;
+      if (left + 190 > cRect.width) left = (evt.clientX - cRect.left) - 200;
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
+    }
+    hit.addEventListener('mousemove', handleMove);
+    hit.addEventListener('mouseleave', () => { crosshair.style.opacity = 0; tip.style.opacity = 0; });
+  }
+
+  // ---- Chart 1: four limiter lines, in resident-WARP terms (not raw block count) ----
+  // Raw block count is misleading on its own: a tile size can win on block count
+  // while losing on occupancy, because warps/block also changes with tile size.
+  // Converting every limiter to "warps admitted under that limit alone" makes the
+  // lowest line directly comparable to the 48-warp/SM ceiling -- and to Chart 2.
+  buildChart(document.getElementById('chart1'), [
+    { get: d => d.wThreads, color: cssVar('--series-1'), name: 'Threads/SM' },
+    { get: d => d.wRegs,    color: cssVar('--series-2'), name: 'Registers/SM' },
+    { get: d => d.wSmem,    color: cssVar('--series-3'), name: 'Shared memory/block' },
+    { get: d => d.wHw,      color: cssVar('--series-4'), name: 'Hardware max blocks/SM' },
+  ], {
+    height: 260,
+    yMax: 52,
+    yTicks: [0, 12, 24, 36, 48],
+    refLine: { value: 48, label: '48 = max warps/SM (100% occupancy)' },
+    valueLabels: row => `${row.warpsPerBlock * row.b} warps`,
+    aria: 'Resident warps admitted under each limiting resource, versus tile size',
+    tooltip: row => `
+      <div class="row"><span class="k">TILE_SIZE</span><b>${row.T}</b></div>
+      <div class="row"><span class="k">Warps/block</span><b>${row.warpsPerBlock}</b></div>
+      <div class="row"><span class="k">Threads/SM limit</span><b>${row.wThreads} warps</b></div>
+      <div class="row"><span class="k">Registers/SM limit</span><b>${row.wRegs} warps</b></div>
+      <div class="row"><span class="k">Shared mem limit</span><b>${row.wSmem} warps</b></div>
+      <div class="row"><span class="k">Hardware cap</span><b>${row.wHw} warps</b></div>
+      <div class="row"><span class="k">Binding (min) = resident warps</span><b>${row.warpsPerBlock * row.b}</b></div>
+    `
+  });
+
+  const legend1 = document.getElementById('legend1');
+  [
+    ['Threads/SM', cssVar('--series-1')],
+    ['Registers/SM', cssVar('--series-2')],
+    ['Shared memory/block', cssVar('--series-3')],
+    ['Hardware max blocks/SM', cssVar('--series-4')],
+  ].forEach(([label, color]) => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
+    legend1.appendChild(item);
+  });
+
+  // ---- Chart 2: occupancy % ----
+  buildChart(document.getElementById('chart2'), [
+    { get: d => d.occ, color: cssVar('--occ-line'), fill: cssVar('--occ-fill'), markTested: true },
+  ], {
+    height: 220,
+    yMax: 100,
+    yTicks: [0, 25, 50, 75, 100],
+    yFmt: t => t + '%',
+    aria: 'Resulting occupancy percentage versus tile size',
+    tooltip: row => `
+      <div class="row"><span class="k">TILE_SIZE</span><b>${row.T}</b></div>
+      <div class="row"><span class="k">Occupancy</span><b>${row.occ.toFixed(1)}%</b></div>
+      <div class="row"><span class="k">Binding blocks</span><b>${row.b}</b></div>
+      ${row.tested ? '<div class="row"><span class="k">Benchmarked</span><b>yes</b></div>' : ''}
+    `
+  });
+})();
+</script>
+</body>
+</html>

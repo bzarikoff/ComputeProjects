@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM Optimization</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --bg:            #faf8f4;
+    --surface:       #ffffff;
+    --surface-sunk:  #f2efe8;
+    --text-primary:  #1c1a17;
+    --text-secondary:#5b564c;
+    --text-muted:    #8a8478;
+    --border:        rgba(28,26,23,0.12);
+    --border-strong: rgba(28,26,23,0.22);
+    --accent:        #b0632e;
+    --accent-soft:   #f1e2d3;
+    --accent-ink:    #7a4620;
+    --rule:          #d8d2c4;
+
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --occ-line: #256abf;
+    --occ-fill: #cde2fb;
+    --mark:     #e34948;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg:            #171512;
+      --surface:       #201d19;
+      --surface-sunk:  #1b1815;
+      --text-primary:  #f5f1ea;
+      --text-secondary:#c7c0b3;
+      --text-muted:    #8f887a;
+      --border:        rgba(245,241,234,0.12);
+      --border-strong: rgba(245,241,234,0.22);
+      --accent:        #dd9256;
+      --accent-soft:   #3a2a1c;
+      --accent-ink:    #f0c396;
+      --rule:          #35312a;
+
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --occ-line: #6da7ec;
+      --occ-fill: #184f95;
+      --mark:     #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:            #171512;
+    --surface:       #201d19;
+    --surface-sunk:  #1b1815;
+    --text-primary:  #f5f1ea;
+    --text-secondary:#c7c0b3;
+    --text-muted:    #8f887a;
+    --border:        rgba(245,241,234,0.12);
+    --border-strong: rgba(245,241,234,0.22);
+    --accent:        #dd9256;
+    --accent-soft:   #3a2a1c;
+    --accent-ink:    #f0c396;
+    --rule:          #35312a;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --occ-line: #6da7ec;
+    --occ-fill: #184f95;
+    --mark:     #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  .page { max-width: 880px; margin: 0 auto; padding: 64px 28px 96px; }
+  .prose { max-width: 680px; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 3px;
+    margin-bottom: 18px;
+  }
+
+  h1 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-weight: 700;
+    font-size: clamp(28px, 4.5vw, 40px);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin: 0 0 14px 0;
+    text-wrap: balance;
+  }
+  .dek {
+    font-size: 18px;
+    color: var(--text-secondary);
+    margin: 0 0 40px 0;
+    max-width: 620px;
+    text-wrap: balance;
+  }
+
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    padding-bottom: 40px;
+    margin-bottom: 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .meta-row b { color: var(--text-secondary); font-weight: 500; }
+
+  h2 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin: 0 0 6px 0;
+  }
+  .h2-num { color: var(--accent); margin-right: 10px; }
+  h3 {
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 600;
+    font-size: 20px;
+    margin: 0 0 10px 0;
+    color: var(--text-primary);
+  }
+
+  section { margin: 0 0 56px 0; }
+  section > .section-title { margin-bottom: 22px; }
+
+  p { margin: 0 0 16px 0; }
+  p:last-child { margin-bottom: 0; }
+  .prose p + p { margin-top: 16px; }
+
+  a { color: var(--accent); text-decoration-color: var(--border-strong); }
+  a:hover { text-decoration-color: var(--accent); }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  .prose code {
+    font-size: 0.88em;
+    background: var(--surface-sunk);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+  }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .stat {
+    background: var(--surface);
+    padding: 18px 16px;
+  }
+  .stat .num {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 26px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.1;
+  }
+  .stat .num .unit { font-size: 14px; font-weight: 500; color: var(--text-muted); margin-left: 3px; }
+  .stat .label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    letter-spacing: 0.01em;
+  }
+  .stat.accent .num { color: var(--accent); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+  }
+  .card + .card { margin-top: 16px; }
+
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 16px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .step:last-child { border-bottom: none; padding-bottom: 0; }
+  .step:first-child { padding-top: 0; }
+  .step-num {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 600;
+    padding-top: 2px;
+  }
+  .step-body b { display: block; font-weight: 600; margin-bottom: 3px; color: var(--text-primary); }
+  .step-body p { color: var(--text-secondary); font-size: 15px; margin: 0; }
+  .step-body .step-result {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 3px;
+    margin-top: 8px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--rule);
+  }
+  th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  td.num, th.num { text-align: right; font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  tr.highlight td { background: var(--accent-soft); }
+  tr.highlight td:first-child { border-radius: 6px 0 0 6px; }
+  tr.highlight td:last-child { border-radius: 0 6px 6px 0; }
+  tr:last-child td { border-bottom: none; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; padding: 6px 4px; background: var(--surface); }
+  .table-wrap table { padding: 0 10px; }
+
+  .bar-cell { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+  .bar-track { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-sunk); overflow: hidden; flex-shrink: 0; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+  .bar-fill.dim { background: var(--text-muted); opacity: 0.5; }
+
+  .finding {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    padding: 20px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .finding:last-child { border-bottom: none; padding-bottom: 0; }
+  .finding:first-child { padding-top: 0; }
+  .finding b { font-size: 16.5px; color: var(--text-primary); }
+  .finding p { color: var(--text-secondary); font-size: 15px; margin: 0; }
+
+  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 22px 14px; }
+  .chart-card + .chart-card { margin-top: 16px; }
+  .chart-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .chart-note { font-size: 13px; color: var(--text-muted); margin: 0 0 12px 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px 18px; font-size: 12px; color: var(--text-secondary); margin: 10px 2px 0; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 3px; border-radius: 2px; display: inline-block; }
+  svg.chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid-line { stroke: var(--rule); stroke-width: 1; }
+  .baseline-l { stroke: var(--border-strong); stroke-width: 1; }
+  .axis-label { fill: var(--text-muted); font-size: 10.5px; font-family: "IBM Plex Mono", monospace; }
+  .axis-title { fill: var(--text-secondary); font-size: 11px; font-family: "IBM Plex Mono", monospace; }
+  .line-path { fill: none; stroke-width: 2; }
+  .marker { stroke: var(--surface); stroke-width: 1.5; }
+  .tested-band { fill: var(--text-muted); opacity: 0.06; }
+  .tested-label { fill: var(--text-muted); font-size: 9.5px; font-weight: 600; font-family: "IBM Plex Mono", monospace; }
+  .chart-pos { position: relative; }
+  .tooltip {
+    position: absolute; pointer-events: none;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 8px; padding: 8px 10px; font-size: 11.5px;
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--text-primary); box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+    opacity: 0; transition: opacity 0.08s; white-space: nowrap; z-index: 5;
+  }
+  .tooltip .row { display: flex; justify-content: space-between; gap: 14px; }
+  .tooltip .row + .row { margin-top: 2px; }
+  .tooltip .k { color: var(--text-muted); }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0; }
+  .hit { fill: transparent; cursor: crosshair; }
+
+  .formula-block {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    background: var(--surface-sunk);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 14px 0 0;
+  }
+  .formula-block .c { color: var(--text-muted); }
+
+  footer {
+    margin-top: 72px;
+    padding-top: 24px;
+    border-top: 1px solid var(--rule);
+    font-size: 12.5px;
+    color: var(--text-muted);
+    font-family: "IBM Plex Mono", monospace;
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <span class="eyebrow">Engineering Report</span>
+  <h1>Taking a GEMM Kernel from Naive to 95% of cuBLAS</h1>
+  <p class="dek">A step-by-step CUDA optimization investigation on an RTX 3080 Ti — shared memory, register tiling, occupancy analysis, warp-level tiling, Tensor Cores, and asynchronous double buffering.</p>
+
+  <div class="meta-row">
+    <span><b>Target GPU</b> NVIDIA GeForce RTX 3080 Ti (Ampere, sm_86)</span>
+    <span><b>Precision</b> FP32 baseline → FP16×FP16→FP32 (Tensor Core stages)</span>
+    <span><b>Problem</b> Square matrix multiply, N=1024</span>
+    <span><b>Baseline → Final</b> 2070 → 13358 GFLOPS (6.4×)</span>
+  </div>
+
+  <section>
+    <div class="stat-grid">
+      <div class="stat accent">
+        <div class="num">13,358<span class="unit">GFLOPS</span></div>
+        <div class="label">Best kernel throughput at N=1024</div>
+      </div>
+      <div class="stat">
+        <div class="num">~81–95<span class="unit">%</span></div>
+        <div class="label">of cuBLAS throughput</div>
+      </div>
+      <div class="stat">
+        <div class="num">6.4<span class="unit">×</span></div>
+        <div class="label">speedup over naive kernel</div>
+      </div>
+      <div class="stat">
+        <div class="num">9<span class="unit">kernels</span></div>
+        <div class="label">written and benchmarked</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">01</span>Goal &amp; hardware</h2></div>
+    <div class="prose">
+      <p>The investigation started from a plain triple-nested-loop matrix multiply and iteratively optimized it — first on CUDA cores (shared memory, register tiling, multi-level warp tiling), then switching to Tensor Cores with mixed FP16/FP32 precision — while measuring against <code>cublasSgemm</code> as the practical ceiling at every stage. Every result below is at N=1024 on the same GPU, correctness-verified against a CPU reference at N≤512.</p>
+    </div>
+    <div class="table-wrap" style="margin-top:20px;">
+      <table>
+        <tbody>
+          <tr><th>GPU</th><td class="mono">NVIDIA GeForce RTX 3080 Ti (GA102, compute capability 8.6)</td></tr>
+          <tr><th>SMs</th><td class="mono">80</td></tr>
+          <tr><th>Max threads / SM</th><td class="mono">1536 (48 warps)</td></tr>
+          <tr><th>Registers / SM</th><td class="mono">65,536</td></tr>
+          <tr><th>Shared memory / block</th><td class="mono">49,152 bytes (default), 100 KB / SM</td></tr>
+          <tr><th>Peak memory bandwidth</th><td class="mono">912.1 GB/s (384-bit @ 9501 MHz)</td></tr>
+          <tr><th>Driver / CUDA</th><td class="mono">572.83 / 12.8</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">02</span>Methodology</h2></div>
+    <div class="card">
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">01</div>
+          <div class="step-body">
+            <b>Naive kernel</b>
+            <p>One thread per output element; every thread re-reads a full row of A and column of B from global memory. Establishes the correctness baseline and the number to beat.</p>
+            <span class="step-result">2070 GFLOPS</span>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">02</div>
+          <div class="step-body">
+            <b>Shared-memory tiling</b>
+            <p>Each block cooperatively loads a tile of A/B into <code>__shared__</code> memory once, reused by every thread in the block instead of hitting global memory per element.</p>
+            <span class="step-result">2699 GFLOPS</span>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">03</div>
+          <div class="step-body">
+            <b>Register (thread) tiling + tile-size sweep</b>
+            <p>Each thread accumulates <code>TM=4</code> output rows in registers instead of one, reusing each shared-memory read across multiple FMAs. Swept <code>TILE_SIZE</code> ∈ {8, 16, 32} to find the occupancy sweet spot — see Section 04.</p>
+            <span class="step-result">5800 GFLOPS (TILE_SIZE=16, best)</span>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">04</div>
+          <div class="step-body">
+            <b>Multi-level (block → warp → thread) tiling</b>
+            <p>Added an explicit warp-tile layer between the block and thread levels, decoupling block shape from tile shape. On CUDA cores alone this reorganized indices without adding new reuse — see Finding 3.</p>
+            <span class="step-result">5592 GFLOPS (best config, ≈ flat vs. step 03)</span>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">05</div>
+          <div class="step-body">
+            <b>Tensor Cores (FP16×FP16→FP32)</b>
+            <p>Replaced the manual thread-tile accumulation with <code>wmma::mma_sync</code> — a warp-collective 16×16×16 matrix instruction on dedicated hardware. Inputs cast to FP16; accumulation stays FP32.</p>
+            <span class="step-result">8224 GFLOPS</span>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">06</div>
+          <div class="step-body">
+            <b><code>cp.async</code> double buffering</b>
+            <p>Two shared-memory buffers instead of one: the next tile loads asynchronously in the background while Tensor Cores compute on the current tile, instead of load → sync → compute → sync running fully serially.</p>
+            <span class="step-result">13,358 GFLOPS — final result</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">03</span>Results</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Kernel</th>
+            <th class="num">GFLOPS</th>
+            <th class="num">vs. cuBLAS</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Naive</td>
+            <td class="num">2,070</td>
+            <td class="num"><div class="bar-cell"><span>14.7%</span><span class="bar-track"><span class="bar-fill dim" style="width:14.7%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Shared memory tiled</td>
+            <td class="num">2,699</td>
+            <td class="num"><div class="bar-cell"><span>19.2%</span><span class="bar-track"><span class="bar-fill dim" style="width:19.2%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Register tiled — TILE_SIZE=8</td>
+            <td class="num">4,025</td>
+            <td class="num"><div class="bar-cell"><span>28.6%</span><span class="bar-track"><span class="bar-fill dim" style="width:28.6%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Register tiled — TILE_SIZE=32</td>
+            <td class="num">5,021</td>
+            <td class="num"><div class="bar-cell"><span>35.7%</span><span class="bar-track"><span class="bar-fill dim" style="width:35.7%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Register tiled — TILE_SIZE=16 <span style="color:var(--text-muted)">(best CUDA-core)</span></td>
+            <td class="num">5,800</td>
+            <td class="num"><div class="bar-cell"><span>41.0%</span><span class="bar-track"><span class="bar-fill dim" style="width:41.0%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Multi-level tiled (block/warp/thread)</td>
+            <td class="num">5,592</td>
+            <td class="num"><div class="bar-cell"><span>39.7%</span><span class="bar-track"><span class="bar-fill dim" style="width:39.7%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td>Tensor Core, single-buffered</td>
+            <td class="num">8,224</td>
+            <td class="num"><div class="bar-cell"><span>58.4%</span><span class="bar-track"><span class="bar-fill dim" style="width:58.4%"></span></span></div></td>
+          </tr>
+          <tr class="highlight">
+            <td><b>Tensor Core, cp.async double-buffered</b></td>
+            <td class="num"><b>13,358</b></td>
+            <td class="num"><div class="bar-cell"><span><b>94.9%</b></span><span class="bar-track"><span class="bar-fill" style="width:94.9%"></span></span></div></td>
+          </tr>
+          <tr>
+            <td style="color:var(--text-muted)">cuBLAS (<code>cublasSgemm</code>)</td>
+            <td class="num" style="color:var(--text-muted)">14,081–16,513</td>
+            <td class="num"><div class="bar-cell"><span>100%</span><span class="bar-track"><span class="bar-fill" style="width:100%"></span></span></div></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="chart-note" style="margin-top:10px;">cuBLAS varied 14,081–16,513 GFLOPS across runs; the 94.9% figure uses the lower bound as a conservative estimate, so the true figure is between roughly 81% and 95%.</p>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">04</span>Occupancy investigation</h2></div>
+    <div class="prose" style="margin-bottom:24px;">
+      <p>Before adding warp-level tiling, the register-tiled kernel (<code>TM=4</code>) was swept across <code>TILE_SIZE</code> ∈ {8, 16, 32} — the value that sets both the shared-memory tile size <i>and</i> the block's thread count. TILE_SIZE=16 won at 5800 GFLOPS, beating both its neighbors (4025 and 5021 GFLOPS). The charts below explain why, using each tile size's actual measured register count (via <code>nvcc -Xptxas -v</code>) and this GPU's real resource limits.</p>
+    </div>
+
+    <div class="chart-card">
+      <h3>Resident warps admitted, by limiting resource</h3>
+      <p class="chart-note">Each line = how many warps would fit under that ONE resource alone. The lowest line at a given TILE_SIZE is the actual binding constraint. Shown in warp terms (not raw block count) because raw block count is misleading on its own — small tiles admit many thin blocks, large tiles admit few fat ones.</p>
+      <div class="chart-pos" id="chart1"></div>
+      <div class="legend" id="legend1"></div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Resulting occupancy</h3>
+      <p class="chart-note">Occupancy = (blocks admitted × warps/block) / 48 max warps per SM. Red dots mark the three TILE_SIZE values actually compiled and benchmarked.</p>
+      <div class="chart-pos" id="chart2"></div>
+    </div>
+
+    <div class="chart-card">
+      <h3 style="font-size:14px;">Formulas</h3>
+      <p class="chart-note">T = TILE_SIZE. All block-count terms are floored — a block only admits if it fully fits.</p>
+      <div class="formula-block"><span class="c">// max blocks admitted under EACH resource alone</span>
+bThreads(T) = floor( threadsPerSM / threadsRounded(T) )
+bRegs(T)    = floor( regsPerSM / (regsPerThread * threadsRounded(T)) )
+bSmem(T)    = floor( smemPerBlock / smemBytes(T) )
+bHw         = maxBlocksPerSM              <span class="c">// flat hardware cap</span>
+
+<span class="c">// binding constraint = smallest of the four; occupancy uses it in warp terms</span>
+b(T) = min( bThreads(T), bRegs(T), bSmem(T), bHw )
+occupancy(T) = ( b(T) * warpsPerBlock(T) / 48 ) * 100%</div>
+    </div>
+
+    <div class="prose" style="margin-top:24px;">
+      <p><b>TILE_SIZE=32</b> is bound by raw thread count: <code>blockDim(32,32) = 1024</code> threads/block, and since <code>2×1024 &gt; 1536</code> max threads/SM, only one block can ever be resident — a hard ceiling regardless of registers or shared memory. <b>TILE_SIZE=8</b> is bound by a different, flatter constraint: the GPU's hardware cap of 16 resident blocks/SM, which becomes binding specifically because 64-thread blocks are small enough that every other resource would allow far more than 16. <b>TILE_SIZE=16</b> lands in the gap between those two failure modes — small enough that the flat 16-block cap isn't binding, large enough that thread count isn't binding either — leaving registers as the binding constraint, at a noticeably better ratio than either neighbor.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">05</span>Key findings</h2></div>
+    <div class="card">
+      <div class="finding">
+        <b>Bigger tiles are not automatically better.</b>
+        <p>TILE_SIZE=16 beat TILE_SIZE=32 by 15% despite computing a smaller shared-memory tile per block. The bottleneck moved from memory traffic to occupancy, and occupancy is governed by which hardware resource (threads, registers, shared memory, or the flat max-blocks-per-SM cap) binds first — not by tile size alone.</p>
+      </div>
+      <div class="finding">
+        <b>Warp tiling alone did nothing on CUDA cores.</b>
+        <p>Adding an explicit warp-tile layer between block and thread tiling reorganizes <i>which</i> thread reads <i>which</i> shared-memory address — it creates no new reuse by itself. The best multi-level configuration (5592 GFLOPS) landed within noise of the simpler two-level kernel (5800 GFLOPS). Warp tiling only pays off when paired with something that actually needs warp granularity: bank-conflict-aware layouts, <code>__shfl_sync</code>, or — as it turned out — Tensor Cores.</p>
+      </div>
+      <div class="finding">
+        <b>Tensor Cores were the single largest architectural jump.</b>
+        <p>Replacing the manual register-accumulation loop with one <code>wmma::mma_sync</code> call per warp lifted throughput from 5800 to 8224 GFLOPS — a structurally different execution path (dedicated matrix-multiply hardware, FP16 inputs, FP32 accumulation) rather than a tuned version of the same CUDA-core kernel.</p>
+      </div>
+      <div class="finding">
+        <b>Double buffering beat higher occupancy.</b>
+        <p><code>cp.async</code> double buffering dropped occupancy from 100% to ~67% (two shared-memory buffers instead of one costs registers) yet delivered the largest single gain of the entire investigation — 8224 → 13,358 GFLOPS. Overlapping the next tile's load with the current tile's compute eliminated far more idle time than the occupancy loss cost, a direct counterexample to always maximizing occupancy as a goal in itself.</p>
+      </div>
+      <div class="finding">
+        <b>Empirical tuning beat theoretical prediction, repeatedly.</b>
+        <p>Every stage that looked like a clear win on paper (bigger tiles, more register reuse, warp tiling) had to be measured to find out whether it actually helped — several didn't. This mirrors how production libraries like cuBLAS and rocBLAS work: an offline empirical search over kernel variants per problem shape, not a single hand-derived "optimal" kernel.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title"><h2><span class="h2-num">06</span>Remaining gap to cuBLAS</h2></div>
+    <div class="prose">
+      <p>The final kernel reaches roughly 81–95% of cuBLAS. The likely remainder: cuBLAS dispatches between many pre-tuned kernel variants selected per problem shape rather than running one fixed kernel; it likely uses deeper pipelines (3+ pipeline stages vs. this investigation's 2); and portions of its kernels may be hand-scheduled at the assembly (SASS) level in ways standard CUDA C++ can't directly express. Closing that last gap further would mean adopting those same techniques — not a new category of optimization, but a deeper, more exhaustive version of the ones already used here.</p>
+    </div>
+  </section>
+
+  <footer>
+    RTX 3080 Ti · sm_86 · CUDA 12.8 · Driver 572.83 · N=1024 unless noted · Correctness verified against CPU reference at N≤512
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  const TM = 4, R = 44, regsSM = 65536, threadsSM = 1536, smemBlock = 49152, hwCap = 16, warpSize = 32, maxWarps = 48;
+  const tested = new Set([8, 16, 32]);
+  const data = [];
+  for (let T = 4; T <= 32; T++) {
+    const threads = T * T;
+    if (threads > 1024) continue;
+    const warpsPerBlock = Math.ceil(threads / warpSize);
+    const threadsRounded = warpsPerBlock * warpSize;
+    const smem = 4 * T * T * (TM + 1);
+    const bThreads = Math.floor(threadsSM / threadsRounded);
+    const bRegs = Math.floor(regsSM / (R * threadsRounded));
+    const bSmem = Math.floor(smemBlock / smem);
+    const b = Math.min(bThreads, bRegs, bSmem, hwCap);
+    const occ = (b * warpsPerBlock / maxWarps) * 100;
+    const wThreads = bThreads * warpsPerBlock;
+    const wRegs = bRegs * warpsPerBlock;
+    const wSmem = bSmem * warpsPerBlock;
+    const wHw = hwCap * warpsPerBlock;
+    data.push({ T, bThreads, bRegs, bSmem, hwCap, b, occ, warpsPerBlock, wThreads, wRegs, wSmem, wHw, tested: tested.has(T) });
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function buildChart(container, series, opts) {
+    const W = 820, H = opts.height || 250, padL = 40, padR = 14, padT = 14, padB = 28;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const xs = data.map(d => d.T);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs);
+    const yMax = opts.yMax;
+    const x = T => padL + ((T - xMin) / (xMax - xMin)) * plotW;
+    const y = v => padT + plotH - (v / yMax) * plotH;
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('class', 'chart-svg');
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', opts.aria || '');
+
+    const clipId = 'clip-' + Math.random().toString(36).slice(2);
+    const defs = document.createElementNS(svgNS, 'defs');
+    const clipPath = document.createElementNS(svgNS, 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipRect = document.createElementNS(svgNS, 'rect');
+    clipRect.setAttribute('x', padL); clipRect.setAttribute('y', padT);
+    clipRect.setAttribute('width', plotW); clipRect.setAttribute('height', plotH);
+    clipPath.appendChild(clipRect);
+    defs.appendChild(clipPath);
+    svg.appendChild(defs);
+
+    const plotGroup = document.createElementNS(svgNS, 'g');
+    plotGroup.setAttribute('clip-path', `url(#${clipId})`);
+
+    [8, 16, 32].forEach(T => {
+      const bx = x(T);
+      const band = document.createElementNS(svgNS, 'rect');
+      band.setAttribute('class', 'tested-band');
+      band.setAttribute('x', bx - 6); band.setAttribute('y', padT);
+      band.setAttribute('width', 12); band.setAttribute('height', plotH);
+      svg.appendChild(band);
+    });
+
+    opts.yTicks.forEach(t => {
+      const gy = y(t);
+      const line = document.createElementNS(svgNS, 'line');
+      line.setAttribute('class', 'grid-line');
+      line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+      line.setAttribute('y1', gy); line.setAttribute('y2', gy);
+      svg.appendChild(line);
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'axis-label');
+      lbl.setAttribute('x', padL - 8); lbl.setAttribute('y', gy + 3.5);
+      lbl.setAttribute('text-anchor', 'end');
+      lbl.textContent = opts.yFmt ? opts.yFmt(t) : t;
+      svg.appendChild(lbl);
+    });
+
+    const base = document.createElementNS(svgNS, 'line');
+    base.setAttribute('class', 'baseline-l');
+    base.setAttribute('x1', padL); base.setAttribute('x2', W - padR);
+    base.setAttribute('y1', padT + plotH); base.setAttribute('y2', padT + plotH);
+    svg.appendChild(base);
+
+    if (opts.refLine) {
+      const ry = y(opts.refLine.value);
+      const rline = document.createElementNS(svgNS, 'line');
+      rline.setAttribute('x1', padL); rline.setAttribute('x2', W - padR);
+      rline.setAttribute('y1', ry); rline.setAttribute('y2', ry);
+      rline.setAttribute('stroke', cssVar('--text-muted'));
+      rline.setAttribute('stroke-width', 1.25);
+      rline.setAttribute('stroke-dasharray', '5 4');
+      svg.appendChild(rline);
+      const rlbl = document.createElementNS(svgNS, 'text');
+      rlbl.setAttribute('class', 'axis-label');
+      rlbl.setAttribute('x', W - padR); rlbl.setAttribute('y', ry - 5);
+      rlbl.setAttribute('text-anchor', 'end');
+      rlbl.textContent = opts.refLine.label;
+      svg.appendChild(rlbl);
+    }
+
+    [4, 8, 12, 16, 20, 24, 28, 32].forEach(T => {
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'axis-label');
+      lbl.setAttribute('x', x(T)); lbl.setAttribute('y', padT + plotH + 17);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.textContent = T;
+      svg.appendChild(lbl);
+    });
+    const xTitle = document.createElementNS(svgNS, 'text');
+    xTitle.setAttribute('class', 'axis-title');
+    xTitle.setAttribute('x', padL + plotW / 2); xTitle.setAttribute('y', H - 2);
+    xTitle.setAttribute('text-anchor', 'middle');
+    xTitle.textContent = 'TILE_SIZE';
+    svg.appendChild(xTitle);
+
+    [8, 16, 32].forEach(T => {
+      const lbl = document.createElementNS(svgNS, 'text');
+      lbl.setAttribute('class', 'tested-label');
+      lbl.setAttribute('x', x(T)); lbl.setAttribute('y', padT - 3);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.textContent = 'tested';
+      svg.appendChild(lbl);
+    });
+
+    series.forEach(s => {
+      let d = '';
+      data.forEach((row, i) => {
+        const px = x(row.T), py = y(s.get(row));
+        d += (i === 0 ? 'M' : 'L') + px.toFixed(2) + ' ' + py.toFixed(2) + ' ';
+      });
+      const path = document.createElementNS(svgNS, 'path');
+      path.setAttribute('class', 'line-path');
+      path.setAttribute('d', d);
+      path.setAttribute('stroke', s.color);
+      if (s.fill) {
+        const area = document.createElementNS(svgNS, 'path');
+        const dArea = d + `L ${x(xMax).toFixed(2)} ${y(0).toFixed(2)} L ${x(xMin).toFixed(2)} ${y(0).toFixed(2)} Z`;
+        area.setAttribute('d', dArea);
+        area.setAttribute('fill', s.fill);
+        area.setAttribute('opacity', '0.5');
+        plotGroup.appendChild(area);
+      }
+      plotGroup.appendChild(path);
+
+      data.forEach(row => {
+        const val = s.get(row);
+        const r = document.createElementNS(svgNS, 'circle');
+        const isTestedPoint = s.markTested && row.tested;
+        r.setAttribute('class', 'marker');
+        r.setAttribute('cx', x(row.T)); r.setAttribute('cy', y(val));
+        r.setAttribute('r', isTestedPoint ? 5 : 2.5);
+        r.setAttribute('fill', isTestedPoint ? cssVar('--mark') : s.color);
+        plotGroup.appendChild(r);
+      });
+    });
+    svg.appendChild(plotGroup);
+
+    if (opts.valueLabels) {
+      data.filter(row => row.tested).forEach(row => {
+        const vals = series.map(s => s.get(row));
+        const minVal = Math.min(...vals);
+        const clampedY = Math.max(padT + 10, y(minVal));
+        const lbl = document.createElementNS(svgNS, 'text');
+        lbl.setAttribute('x', x(row.T)); lbl.setAttribute('y', clampedY - 10);
+        lbl.setAttribute('text-anchor', 'middle');
+        lbl.setAttribute('font-size', '11px');
+        lbl.setAttribute('font-family', "'IBM Plex Mono', monospace");
+        lbl.setAttribute('font-weight', '600');
+        lbl.setAttribute('fill', cssVar('--text-primary'));
+        lbl.textContent = opts.valueLabels(row);
+        svg.appendChild(lbl);
+      });
+    }
+
+    const crosshair = document.createElementNS(svgNS, 'line');
+    crosshair.setAttribute('class', 'crosshair');
+    crosshair.setAttribute('y1', padT); crosshair.setAttribute('y2', padT + plotH);
+    svg.appendChild(crosshair);
+
+    const hit = document.createElementNS(svgNS, 'rect');
+    hit.setAttribute('class', 'hit');
+    hit.setAttribute('x', padL); hit.setAttribute('y', padT);
+    hit.setAttribute('width', plotW); hit.setAttribute('height', plotH);
+    svg.appendChild(hit);
+
+    container.style.position = 'relative';
+    container.appendChild(svg);
+
+    const tip = document.createElement('div');
+    tip.className = 'tooltip';
+    container.appendChild(tip);
+
+    function handleMove(evt) {
+      const rect = svg.getBoundingClientRect();
+      const scale = W / rect.width;
+      const mx = (evt.clientX - rect.left) * scale;
+      const relX = (mx - padL) / plotW;
+      let T = Math.round(xMin + relX * (xMax - xMin));
+      T = Math.max(xMin, Math.min(xMax, T));
+      const row = data.find(d => d.T === T);
+      if (!row) return;
+      crosshair.setAttribute('x1', x(T)); crosshair.setAttribute('x2', x(T));
+      crosshair.style.opacity = 1;
+      tip.innerHTML = opts.tooltip(row);
+      tip.style.opacity = 1;
+      const cRect = container.getBoundingClientRect();
+      let left = (evt.clientX - cRect.left) + 14;
+      let top = (evt.clientY - cRect.top) - 10;
+      if (left + 190 > cRect.width) left = (evt.clientX - cRect.left) - 200;
+      tip.style.left = left + 'px'; tip.style.top = top + 'px';
+    }
+    hit.addEventListener('mousemove', handleMove);
+    hit.addEventListener('mouseleave', () => { crosshair.style.opacity = 0; tip.style.opacity = 0; });
+  }
+
+  buildChart(document.getElementById('chart1'), [
+    { get: d => d.wThreads, color: cssVar('--series-1'), name: 'Threads/SM' },
+    { get: d => d.wRegs,    color: cssVar('--series-2'), name: 'Registers/SM' },
+    { get: d => d.wSmem,    color: cssVar('--series-3'), name: 'Shared memory/block' },
+    { get: d => d.wHw,      color: cssVar('--series-4'), name: 'Hardware max blocks/SM' },
+  ], {
+    height: 250, yMax: 52, yTicks: [0, 12, 24, 36, 48],
+    refLine: { value: 48, label: '48 = max warps/SM' },
+    valueLabels: row => `${row.warpsPerBlock * row.b} warps`,
+    aria: 'Resident warps admitted under each limiting resource, versus tile size',
+    tooltip: row => `
+      <div class="row"><span class="k">TILE_SIZE</span><b>${row.T}</b></div>
+      <div class="row"><span class="k">Warps/block</span><b>${row.warpsPerBlock}</b></div>
+      <div class="row"><span class="k">Threads/SM limit</span><b>${row.wThreads} warps</b></div>
+      <div class="row"><span class="k">Registers/SM limit</span><b>${row.wRegs} warps</b></div>
+      <div class="row"><span class="k">Shared mem limit</span><b>${row.wSmem} warps</b></div>
+      <div class="row"><span class="k">Hardware cap</span><b>${row.wHw} warps</b></div>
+      <div class="row"><span class="k">Binding = resident warps</span><b>${row.warpsPerBlock * row.b}</b></div>
+    `
+  });
+
+  const legend1 = document.getElementById('legend1');
+  [
+    ['Threads/SM', cssVar('--series-1')],
+    ['Registers/SM', cssVar('--series-2')],
+    ['Shared memory/block', cssVar('--series-3')],
+    ['Hardware max blocks/SM', cssVar('--series-4')],
+  ].forEach(([label, color]) => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
+    legend1.appendChild(item);
+  });
+
+  buildChart(document.getElementById('chart2'), [
+    { get: d => d.occ, color: cssVar('--occ-line'), fill: cssVar('--occ-fill'), markTested: true },
+  ], {
+    height: 210, yMax: 100, yTicks: [0, 25, 50, 75, 100], yFmt: t => t + '%',
+    aria: 'Resulting occupancy percentage versus tile size',
+    tooltip: row => `
+      <div class="row"><span class="k">TILE_SIZE</span><b>${row.T}</b></div>
+      <div class="row"><span class="k">Occupancy</span><b>${row.occ.toFixed(1)}%</b></div>
+      <div class="row"><span class="k">Binding blocks</span><b>${row.b}</b></div>
+      ${row.tested ? '<div class="row"><span class="k">Benchmarked</span><b>yes</b></div>' : ''}
+    `
+  });
+})();
+</script>
+</body>
+</html>

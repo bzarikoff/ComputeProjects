@@ -10,3 +10,190 @@ Same rules apply as before:
 
 Run from an elevated (Administrator) terminal, or you'll hit ERR_NVGPUCTRPERM again.
 Each exe launches its kernel twice (warm-up + timed), so each .ncu-rep will again contain two result sets — the second one is the timed run you care about. Add --launch-skip 1 --launch-count 1 if you only want that one captured.
+
+===============================================================================
+GPU hardware info (pulled via cudaGetDeviceProperties, this machine)
+===============================================================================
+
+Name: NVIDIA GeForce RTX 3080 Ti
+Compute capability: 8.6 (Ampere, GA102)
+Driver version: 572.83
+CUDA version (driver-supported): 12.8
+
+SM count: 80
+Warp size: 32
+Max threads per block: 1024
+Max threads per SM: 1536  -> max resident warps per SM = 1536/32 = 48
+Max blocks per SM: 16
+
+Registers per block: 65536 (32-bit registers)
+Registers per SM: 65536
+
+Shared memory per block (default static limit): 49152 bytes (48 KB)
+Shared memory per block (opt-in max): 101376 bytes (~99 KB)
+Shared memory per SM: 102400 bytes (100 KB)
+
+Global memory: 12.88 GB
+Memory bus width: 384 bits
+Memory clock rate: 9501 MHz
+GPU clock rate: 1695 MHz
+Theoretical peak memory bandwidth: 912.1 GB/s
+
+===============================================================================
+Why TILE_SIZE=16 outperforms TILE_SIZE=32 in gemm_thread_tile (TM=4)
+===============================================================================
+
+Measured at N=1024 on this GPU:
+  TILE_SIZE=16 -> ~5800 GFLOPS, ~73% achieved occupancy
+  TILE_SIZE=32 -> ~5000 GFLOPS, ~67% achieved occupancy
+
+Root cause is occupancy, but the LIMITER is different at each tile size:
+
+- TILE_SIZE=32: blockDim(32,32) = 1024 threads/block. Since this GPU caps
+  resident threads at 1536/SM, and 2*1024 = 2048 > 1536, only ONE block can
+  be resident per SM no matter how much shared memory or how many spare
+  registers there are. That gives 32 resident warps out of the 48 max ->
+  32/48 = 66.7% occupancy ceiling, purely from thread-count/block-size.
+  Confirmed NOT a shared memory issue: this kernel only uses ~20KB/block
+  (As[128][32] + Bs[32][32] = 16384 + 4096 bytes), well under the 48KB
+  default limit.
+
+- TILE_SIZE=16: blockDim(16,16) = 256 threads/block = 8 warps/block. By
+  thread count alone, 1536/256 = 6 blocks could fit per SM (6*8 = 48 warps
+  = 100% occupancy theoretical). Actual measured occupancy is only 73%,
+  so something below the thread-count ceiling is capping it further.
+  Shared memory is tiny here too (~5KB/block), so the likely limiter is
+  REGISTERS PER THREAD: the TM=4 acc[] accumulators + loop/index variables
+  use enough registers per thread that 6 full blocks' worth can't fit in
+  the SM's 65536-register file. To confirm directly rather than infer,
+  check the "Block Limit" row in Nsight Compute's Occupancy section for
+  each report -- it names the active limiter explicitly (Registers /
+  Warps / Shared Memory / Blocks).
+
+Net effect: more resident warps = more warps available for the SM to
+switch to when one stalls (waiting on a global load, waiting at
+__syncthreads(), etc.), which hides latency and keeps execution units
+busier. TILE_SIZE=16 has more resident warps (73% vs 67%), so it hides
+stalls better and wins on real GFLOPS -- even though TILE_SIZE=32 nominally
+does "more reuse per tile." This is specific to this kernel's launch
+config (blockDim tied directly to TILE_SIZE) and TM=4 -- not a general
+rule that smaller tiles are always better. Changing TM, N, or GPU could
+shift which tile size wins.
+
+===============================================================================
+How to check the register limiter directly (confirmed for TILE_SIZE=16)
+===============================================================================
+
+Fastest way -- compile with verbose ptxas output, targeting the actual GPU
+arch (sm_86 for this RTX 3080 Ti; without -arch it defaults to sm_52 and
+gives a slightly different, less relevant register count):
+
+  nvcc -arch=sm_86 -Xptxas -v sharedThreadTile16.cu -o out.exe
+
+Relevant output line:
+  "Used 44 registers, used 1 barriers, 5120 bytes smem, 380 bytes cmem[0]"
+  -> 44 registers/thread, 5120 bytes shared mem/block, 0 spill stores/loads
+     (0 spills is good -- means the 44 registers were enough, nothing got
+     pushed to slow local memory)
+
+Hand-check which resource is the binding occupancy limiter, using specs
+from the GPU hardware section above (65536 regs/SM, 1536 max threads/SM,
+49152 bytes default shared mem/block):
+
+  Max blocks by registers:      floor(65536 / (44 * 256)) = 5 blocks
+  Max blocks by threads:        1536 / 256                = 6 blocks
+  Max blocks by shared memory:  49152 / 5120               = 9 blocks
+  Max blocks by hardware cap:   16 blocks
+
+  Binding constraint = min(5, 6, 9, 16) = 5 blocks -> REGISTERS
+
+  Occupancy from hand-calc: 5 blocks * 8 warps/block = 40/48 = 83.3%
+  Nsight Compute's actual measured occupancy was 73% -- lower than the
+  hand-calc because real hardware allocates registers/blocks in fixed-size
+  granules (rounded up), not byte-for-byte, so usable block count is often
+  a bit lower than a naive division suggests. The hand-calc still correctly
+  identifies REGISTERS (not threads or shared memory) as the limiter --
+  for the precise number, trust Nsight Compute's Occupancy section
+  "Block Limit" row and "Registers Per Thread" field over hand math.
+
+General recipe for checking this on any kernel:
+  1. nvcc -arch=<your_sm> -Xptxas -v <file>.cu -o <out>.exe
+     -> read off registers/thread and shared mem/block
+  2. Compute max-blocks-per-SM under each limit (registers, threads,
+     shared memory, hardware max blocks) using the target GPU's specs
+  3. The smallest number is the binding limiter
+  4. Confirm precisely via Nsight Compute Occupancy section's
+     "Block Limit" row rather than trusting the hand-calc exactly
+
+===============================================================================
+Does TILE_SIZE itself change register usage? (checked empirically)
+===============================================================================
+
+No -- compiled both TILE_SIZE=16 and TILE_SIZE=32 (same TM=4) with
+-arch=sm_86 -Xptxas -v:
+
+  TILE_SIZE=16: 44 registers/thread, 5120 bytes smem/block
+  TILE_SIZE=32: 44 registers/thread, 20480 bytes smem/block
+
+Register count per thread is IDENTICAL. It's driven by TM (the acc[]
+accumulators) and general loop/index bookkeeping -- not by TILE_SIZE's
+loop trip count. Only shared memory scales with TILE_SIZE (as expected,
+since As/Bs are sized by TILE_SIZE).
+
+But TILE_SIZE still matters indirectly, because it changes threads/block,
+which scales BOTH the thread-count ceiling and the register-derived block
+ceiling together (more threads/block = more total registers consumed per
+block at the same per-thread rate):
+
+  TILE_SIZE=16 (256 threads/block): by-threads=6, by-registers=5 (binding),
+    by-smem=9  -> registers are the SOLE limiter, distinguishably below
+    the thread ceiling
+  TILE_SIZE=32 (1024 threads/block): by-threads=1, by-registers=1 (tied),
+    by-smem=2  -> thread count and registers land on the same answer;
+    can't distinguish which one is "the" limiter, you'd hit the thread
+    ceiling regardless
+
+Conclusion: TILE_SIZE doesn't change per-thread register cost, but it
+changes which constraint ends up binding. To relieve the register limit
+specifically (independent of tile size), the levers are TM (fewer
+accumulators) or __launch_bounds__(maxThreadsPerBlock, minBlocksPerSM)
+to force the compiler to cap registers -- not TILE_SIZE.
+
+===============================================================================
+Is TILE_SIZE=16 actually the best? Checked TILE_SIZE=8 too (TM=4, N=1024)
+===============================================================================
+
+TILE_SIZE=8 (64 threads/block, 2 warps/block, 47 regs/thread,
+1280 bytes smem/block):
+  Max blocks by threads:        1536/64 = 24
+  Max blocks by registers:      floor(65536/(47*64)) = 21
+  Max blocks by shared memory:  49152/1280 = 38
+  Max blocks by HARDWARE CAP:   16  <- binding (new limiter -- this GPU
+    caps resident blocks/SM at 16 regardless of spare register/thread/
+    shared-mem budget; never showed up as binding at TILE_SIZE=16 or 32)
+  Occupancy: 16*2 = 32/48 = 66.7%
+
+Measured: TILE_SIZE=8 -> 4025 GFLOPS (WORSE than both 16 and 32)
+
+Summary table (N=1024, TM=4):
+  TILE_SIZE | threads/block | binding limiter          | occupancy | GFLOPS
+  8         | 64            | hardware max-blocks/SM   | 66.7%     | 4025
+  16        | 256           | registers                | ~73-83%   | 5800
+  32        | 1024          | threads/SM               | 66.7%     | 5000
+
+TILE_SIZE=16 is a genuine local optimum among {8,16,32}, not just
+"happened to beat 32": small enough that registers (not the harder
+thread/hardware-block ceilings) become the limiter, giving better
+occupancy than either neighbor, AND large enough to amortize per-tile
+loop/__syncthreads() overhead better than TILE_SIZE=8 does (8 has
+numTiles=128 loop iterations vs 16's 64 vs 32's 32 -- more tiny
+iterations = more relative sync/bookkeeping overhead per unit of
+compute, which occupancy alone doesn't capture).
+
+Caveats: only {8,16,32} tested (the divisors that keep blockDim.x =
+blockDim.y = TILE_SIZE valid under the 1024 threads/block hardware cap).
+Not tested: non-power-of-2 sizes, or decoupling block shape from the
+shared-memory tile size -- which is what production kernels (cuBLAS,
+CUTLASS) actually do, specifically to avoid this kind of coupled
+constraint. So "16 is best" is accurate for THIS kernel's design and
+THIS sweep, not a universal claim.
