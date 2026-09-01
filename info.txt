@@ -197,3 +197,59 @@ shared-memory tile size -- which is what production kernels (cuBLAS,
 CUTLASS) actually do, specifically to avoid this kind of coupled
 constraint. So "16 is best" is accurate for THIS kernel's design and
 THIS sweep, not a universal claim.
+
+===============================================================================
+wmma (Tensor Core) functions -- quick reference
+===============================================================================
+
+fragment<role, M, N, K, dtype, [layout]>
+  Opaque warp-distributed storage for one 16x16(x16) matrix tile. NOT a
+  normal array -- storage is spread across the warp's 32 threads, mapping
+  is hidden by the API. role = accumulator (output) | matrix_a | matrix_b
+  (inputs). Accumulator dtype is float even when inputs are half (mixed
+  precision: FP16 multiply, FP32 accumulate).
+
+fill_fragment(frag, 0.0f)      -- zero-init, like acc=0
+load_matrix_sync(frag, ptr, leadingDim)
+  -- warp-collective load from shared/global mem into a fragment.
+     leadingDim = stride (elements) between rows of the SOURCE array
+     (e.g. As[BM][BK] -> leadingDim=BK).
+mma_sync(accOut, aFrag, bFrag, accIn)
+  -- accOut = aFrag * bFrag + accIn. ONE instruction = a full 16x16x16
+     matmul (4096 multiply-adds) on dedicated Tensor Core hardware.
+store_matrix_sync(ptr, frag, leadingDim, layout)
+  -- warp-collective write of a fragment back to memory (mirror of load).
+
+All four require every thread in the warp to call them together (that's
+what "_sync" means here -- warp-uniform participation, NOT "this may run
+in the background"). No divergence allowed across a wmma call.
+
+===============================================================================
+Blocking vs non-blocking calls (cp.async double buffering context)
+===============================================================================
+
+Non-blocking (fire-and-forget, returns before work finishes):
+  __pipeline_memcpy_async(...)   -- issues copy on separate async copy HW,
+                                     returns immediately. "_async" in CUDA
+                                     naming is a reliable signal.
+  __pipeline_commit()            -- just closes a batch/group marker for
+                                     later wait_prior() to reference; does
+                                     not wait for those copies to finish.
+
+Blocking (thread waits before the next line runs):
+  __pipeline_wait_prior(N)       -- the actual wait: blocks until at most
+                                     N commit groups remain outstanding.
+  __syncthreads()                -- block-wide barrier, waits for every
+                                     thread in the block to arrive.
+  wmma::fill_fragment / load_matrix_sync / mma_sync / store_matrix_sync
+                                  -- all synchronous; complete before
+                                     returning. IMPORTANT: "_sync" in wmma
+                                     names means warp-uniform participation,
+                                     NOT asynchronous -- opposite trap from
+                                     "_async". Don't infer async/blocking
+                                     from "_sync" alone; check the docs.
+
+Rule of thumb: "_async" = reliable non-blocking signal. "_sync" = often
+means "warp/thread-uniform participation required", NOT "runs in the
+background" -- these can still fully block. When unsure, check the CUDA
+docs for that specific function rather than pattern-matching the name.

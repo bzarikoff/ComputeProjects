@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM Tiling Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --bg:            #faf8f4;
+    --surface:       #ffffff;
+    --surface-sunk:  #f2efe8;
+    --text-primary:  #1c1a17;
+    --text-secondary:#5b564c;
+    --text-muted:    #8a8478;
+    --border:        rgba(28,26,23,0.12);
+    --border-strong: rgba(28,26,23,0.22);
+    --accent:        #b0632e;
+    --accent-soft:   #f1e2d3;
+    --accent-ink:    #7a4620;
+    --rule:          #d8d2c4;
+
+    --tile-a:  #2a78d6;
+    --tile-b:  #eb6834;
+    --tile-c:  #1baf7a;
+    --tile-dim: #d8d2c4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg:            #171512;
+      --surface:       #201d19;
+      --surface-sunk:  #1b1815;
+      --text-primary:  #f5f1ea;
+      --text-secondary:#c7c0b3;
+      --text-muted:    #8f887a;
+      --border:        rgba(245,241,234,0.12);
+      --border-strong: rgba(245,241,234,0.22);
+      --accent:        #dd9256;
+      --accent-soft:   #3a2a1c;
+      --accent-ink:    #f0c396;
+      --rule:          #35312a;
+
+      --tile-a:  #3987e5;
+      --tile-b:  #d95926;
+      --tile-c:  #199e70;
+      --tile-dim: #35312a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:            #171512;
+    --surface:       #201d19;
+    --surface-sunk:  #1b1815;
+    --text-primary:  #f5f1ea;
+    --text-secondary:#c7c0b3;
+    --text-muted:    #8f887a;
+    --border:        rgba(245,241,234,0.12);
+    --border-strong: rgba(245,241,234,0.22);
+    --accent:        #dd9256;
+    --accent-soft:   #3a2a1c;
+    --accent-ink:    #f0c396;
+    --rule:          #35312a;
+
+    --tile-a:  #3987e5;
+    --tile-b:  #d95926;
+    --tile-c:  #199e70;
+    --tile-dim: #35312a;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  .page { max-width: 800px; margin: 0 auto; padding: 60px 26px 100px; }
+  .prose { max-width: 680px; }
+  .prose p { margin: 0 0 15px 0; color: var(--text-secondary); }
+  .prose p:last-child { margin-bottom: 0; }
+  .prose b { color: var(--text-primary); font-weight: 600; }
+  .prose code { font-family: "IBM Plex Mono", monospace; font-size: 0.88em; background: var(--surface-sunk); border: 1px solid var(--border); border-radius: 4px; padding: 0.1em 0.4em; color: var(--text-primary); }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12.5px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-soft);
+    display: inline-block; padding: 3px 9px; border-radius: 3px; margin-bottom: 18px;
+  }
+  h1 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-weight: 700; font-size: clamp(26px, 4.2vw, 36px);
+    line-height: 1.15; letter-spacing: -0.01em; margin: 0 0 14px 0; text-wrap: balance;
+  }
+  .dek { font-size: 17px; color: var(--text-secondary); margin: 0 0 40px 0; max-width: 600px; text-wrap: balance; }
+
+  h2 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-weight: 600; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0 0 22px 0;
+  }
+  .h2-num { color: var(--accent); margin-right: 10px; }
+  h3 { font-family: "IBM Plex Sans", sans-serif; font-weight: 600; font-size: 20px; margin: 0 0 4px 0; color: var(--text-primary); }
+  .h3-sub { font-size: 14px; color: var(--text-muted); margin: 0 0 20px 0; }
+
+  section { margin: 0 0 60px 0; }
+
+  .diagram-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px 22px; margin: 20px 0;
+  }
+  .diagram-label {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--text-muted); margin: 0 0 12px 0;
+  }
+  .diagram-card pre {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.55;
+    margin: 0; overflow-x: auto; color: var(--text-primary);
+    white-space: pre;
+  }
+  .diagram-card pre .a { color: var(--tile-a); font-weight: 600; }
+  .diagram-card pre .b { color: var(--tile-b); font-weight: 600; }
+  .diagram-card pre .c { color: var(--tile-c); font-weight: 600; }
+  .diagram-card pre .dim { color: var(--text-muted); }
+
+  .code-block {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.65;
+    background: var(--surface-sunk); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; white-space: pre; margin: 16px 0 0;
+    color: var(--text-primary);
+  }
+  .code-block .c { color: var(--text-muted); }
+  .code-block .kw { color: var(--accent-ink); }
+
+  .callout {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--accent-soft); border-radius: 8px;
+    padding: 14px 16px; margin: 20px 0 0;
+  }
+  .callout .mark { font-family: "IBM Plex Mono", monospace; font-weight: 700; color: var(--accent); font-size: 13px; flex-shrink: 0; padding-top: 1px; }
+  .callout p { margin: 0; color: var(--accent-ink); font-size: 14.5px; line-height: 1.55; }
+  .callout p b { color: var(--accent-ink); }
+
+  .opt-card {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    padding: 22px 24px; margin-bottom: 16px;
+  }
+  .opt-card:last-child { margin-bottom: 0; }
+  .opt-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+  .opt-head h3 { margin: 0; }
+  .opt-tag {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--text-muted); background: var(--surface-sunk);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; white-space: nowrap;
+  }
+  .opt-card .prose { margin-top: 10px; }
+  .opt-verdict {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; margin-top: 12px;
+    color: var(--text-primary); background: var(--surface-sunk); border-left: 3px solid var(--accent);
+    padding: 8px 12px; border-radius: 0 6px 6px 0;
+  }
+
+  footer {
+    margin-top: 72px; padding-top: 24px; border-top: 1px solid var(--rule);
+    font-size: 12.5px; color: var(--text-muted); font-family: "IBM Plex Mono", monospace;
+  }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <span class="eyebrow">Personal Notes</span>
+  <h1>How GEMM Tiling Actually Works</h1>
+  <p class="dek">My own working-through of the mechanics behind each optimization in the GEMM project — starting from the two ideas that do the real work (shared memory reuse, register reuse), then what every optimization after that is actually doing.</p>
+
+  <section>
+    <h2><span class="h2-num">01</span>Shared memory tiling</h2>
+    <div class="prose">
+      <p>The core idea: <b>don't let every thread independently re-read the same data from slow global memory.</b> Instead, one block cooperatively loads a small tile into fast on-chip shared memory once, and every thread in that block reuses it.</p>
+      <p>Each block owns a fixed <code>TILE_SIZE × TILE_SIZE</code> region of the output <code>C</code>. To compute that region, it needs a full <code>TILE_SIZE</code>-row strip of <code>A</code> and a full <code>TILE_SIZE</code>-column strip of <code>B</code> — but each strip spans the <i>entire</i> width/height <code>N</code>, which is too big to hold in shared memory at once. So the strip gets broken into <code>TILE_SIZE</code>-wide chunks and streamed through shared memory one chunk at a time, accumulating a partial result each pass.</p>
+    </div>
+
+    <div class="diagram-card">
+      <p class="diagram-label">Worked example — N=6, TILE_SIZE=2 (numTiles=3)</p>
+      <pre><span class="a">Matrix A (6x6)</span>                     <span class="b">Matrix B (6x6)</span>                <span class="c">Matrix C (6x6)</span>
+row-strip this block needs:      col-strip this block needs: output tile this block owns:
+
+  t=0  t=1  t=2                   t=0
+ ┌───┬───┬───┐                   ┌───┐
+ │<span class="a">▓▓▓</span>│   │   │  row 0           │<span class="b">▓▓▓</span>│  col 0                <span class="dim">┌───┬───┬───┐</span>
+ │<span class="a">▓▓▓</span>│   │   │  row 1           │<span class="b">▓▓▓</span>│  col 1                │<span class="c">███</span>│   │   │
+ └───┴───┴───┘                    ├───┤  t=1                  │<span class="c">███</span>│   │   │
+                                   │   │  col 0                <span class="dim">├───┼───┼───┤</span>
+                                   │   │  col 1                │   │   │   │
+                                   ├───┤  t=2                  │   │   │   │
+                                   │   │  col 0                <span class="dim">├───┼───┼───┤</span>
+                                   │   │  col 1                │   │   │   │
+                                   └───┘                       └───┴───┴───┘</pre>
+    </div>
+
+    <div class="prose">
+      <p>Per K-chunk iteration <code>t</code>, every thread in the block cooperatively loads <b>one</b> element of <code>A</code>'s chunk and <b>one</b> element of <code>B</code>'s chunk into shared memory (<code>As</code>/<code>Bs</code>) — together, the whole block fills the chunk between them. Then, after a <code>__syncthreads()</code>, each thread reads across the <i>whole</i> loaded chunk (<code>TILE_SIZE</code> values) to accumulate its own partial dot product:</p>
+    </div>
+
+    <div class="code-block"><span class="c">// One load per thread, but TILE_SIZE reads per thread once it's in shared memory —</span>
+<span class="c">// that ratio is the entire reuse win.</span>
+As[ty][tx] = A[row][t*TILE_SIZE + tx];
+Bs[ty][tx] = B[t*TILE_SIZE + ty][col];
+__syncthreads();
+
+<span class="kw">for</span> (k = 0; k < TILE_SIZE; k++)
+    acc += As[ty][k] * Bs[k][tx];   <span class="c">// TILE_SIZE reads from FAST shared memory</span>
+__syncthreads();                    <span class="c">// before the next chunk overwrites this one</span></div>
+
+    <div class="callout">
+      <span class="mark">→</span>
+      <p><b>The insight:</b> <code>A</code>'s tile slides <i>horizontally</i> across K each iteration; <code>B</code>'s tile slides <i>vertically</i>. <code>C</code>'s output tile never moves — the block just keeps accumulating into it as new chunks stream through shared memory. One global load is reused <code>TILE_SIZE</code> times instead of once, which is the entire source of the 2070 → 2699 GFLOPS jump.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="h2-num">02</span>Register reuse (thread tiling)</h2>
+    <div class="prose">
+      <p>Shared memory tiling stopped redundant <i>global</i> reads. Register tiling goes one level deeper: it stops redundant <i>shared-memory</i> reads. Each thread now computes <code>TM</code> output rows instead of 1, accumulating all <code>TM</code> in registers — so a value pulled from shared memory gets reused across multiple output elements by the same thread, not read once and thrown away.</p>
+    </div>
+
+    <div class="diagram-card">
+      <p class="diagram-label">Worked example — TILE_SIZE=2, TM=2 (output tile becomes 4 rows × 2 cols)</p>
+      <pre>Block has 4 threads: (ty,tx) in {(0,0),(0,1),(1,0),(1,1)}
+
+Loading As at tile t (each thread loads TM=2 elements — one per row it owns):
+  thread(0,0) loads <span class="a">As[0][0]</span>  ← A[row+0][t*2+0]
+  thread(0,0) loads <span class="a">As[2][0]</span>  ← A[row+2][t*2+0]     <span class="dim">← same thread, second row, TM steps apart</span>
+  thread(1,0) loads <span class="a">As[1][0]</span>, <span class="a">As[3][0]</span>
+  ...
+
+Computing (per k): read Bs[k][tx] <span class="c">ONCE</span>, reuse across BOTH of this thread's rows:
+  <span class="b">b_val</span> = Bs[k][tx];                 <span class="c">// 1 shared-memory read</span>
+  acc[0] += As[ty+0][k] * <span class="b">b_val</span>;      <span class="c">// reused</span>
+  acc[1] += As[ty+2][k] * <span class="b">b_val</span>;      <span class="c">// reused again</span></pre>
+    </div>
+
+    <div class="code-block"><span class="c">// acc[TM] lives in REGISTERS, not shared memory — fastest storage on the chip</span>
+<span class="kw">float</span> acc[TM] = {0};
+
+<span class="kw">for</span> (k = 0; k < TILE_SIZE; k++) {
+    <span class="kw">float</span> b_val = Bs[k][tx];        <span class="c">// read from shared mem ONCE per k</span>
+    <span class="kw">for</span> (i = 0; i < TM; i++)
+        acc[i] += As[ty + i*TILE_SIZE][k] * b_val;  <span class="c">// reused TM times</span>
+}</div>
+
+    <div class="callout">
+      <span class="mark">→</span>
+      <p><b>The insight:</b> the reuse ratio compounds. Shared memory tiling turned 1 global read into <code>TILE_SIZE</code> shared reads. Register tiling turns each of those shared reads into <code>TM</code> register-level FMAs. This is what pushed CUDA-core throughput from 2699 to 5800 GFLOPS — but only up to a point: more <code>TM</code> means more registers held per thread, which can push occupancy down if taken too far (see the tile-size sweet-spot finding in the main report).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="h2-num">03</span>What the other optimizations are doing</h2>
+    <p class="h3-sub">Everything past this point builds on the same two reuse ideas above — reading less, reusing more — just applied to a different resource or a different hardware unit.</p>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3>Tile-size sweep (8 / 16 / 32)</h3><span class="opt-tag">Occupancy tuning</span></div>
+      <div class="prose">
+        <p>Not a new reuse mechanism — this is about how many blocks/warps can be <i>resident</i> on an SM at once to hide memory latency. <code>TILE_SIZE</code> sets both the shared-memory tile size <i>and</i> the thread count per block (they're coupled in this kernel), so growing it changes three competing ceilings at once: max threads/SM, max registers/SM, and a flat hardware cap on resident blocks. Whichever ceiling is lowest at a given <code>TILE_SIZE</code> decides the actual occupancy.</p>
+      </div>
+      <div class="opt-verdict">Result: TILE_SIZE=16 won — not the biggest tile, the one that avoided every ceiling most efficiently.</div>
+    </div>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3>Multi-level (block → warp → thread) tiling</h3><span class="opt-tag">Organizational, not reuse</span></div>
+      <div class="prose">
+        <p>Adds a middle layer: instead of a thread's address being computed directly from the block (<code>blockRow + threadIdx.y</code>), it now goes through an intermediate warp offset (<code>blockRow + warpTileRow + threadRow*TM</code>). This <i>doesn't create new reuse</i> — it's still reading the same shared memory, the same number of times. What it does is give you the vocabulary to know "these 32 threads are in the same warp," which is a prerequisite for a few real techniques: <code>__shfl_sync</code> to swap values between warp threads without touching shared memory, bank-conflict-aware layout of shared memory, or — the big one — Tensor Cores.</p>
+      </div>
+      <div class="opt-verdict">Result: on CUDA cores alone, this measured within noise of the simpler two-level kernel. It was necessary groundwork for what came next, not a win on its own.</div>
+    </div>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3>Tensor Cores (<code>wmma</code>, FP16×FP16→FP32)</h3><span class="opt-tag">Different hardware unit</span></div>
+      <div class="prose">
+        <p>This is where the warp-tile layer above actually pays off. Instead of a manual register loop doing one FMA at a time, <code>wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag)</code> is a single instruction that computes an entire 16×16×16 matrix multiply, executed collectively by all 32 threads in a warp on dedicated matrix-multiply silicon — hardware a plain CUDA-core kernel never touches. The tradeoff: inputs must be cast to FP16 (accumulation stays FP32), so there's a small, measured precision cost (~2.4e-3 max error, well inside tolerance).</p>
+      </div>
+      <div class="opt-verdict">Result: 5800 → 8224 GFLOPS — the single largest architectural jump in the whole project.</div>
+    </div>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3><code>cp.async</code> double buffering</h3><span class="opt-tag">Hiding latency, not adding reuse</span></div>
+      <div class="prose">
+        <p>Every prior kernel does <code>load → sync → compute → sync</code>, fully serial — nothing starts until the previous step finishes. Double buffering keeps <b>two</b> shared-memory tiles instead of one: while the warp computes on tile <code>t</code> (buffer A), the next tile <code>t+1</code> is already being copied into buffer B in the background via <code>cp.async</code>, which copies global→shared memory without routing through registers. The two buffers swap roles every iteration.</p>
+      </div>
+      <div class="opt-verdict">Result: 8224 → 13,358 GFLOPS, despite occupancy dropping from 100% to ~67% — proof that hiding latency can matter more than maximizing occupancy.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="h2-num">04</span>Tensor Core API &amp; async calls, quick reference</h2>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3><code>wmma</code> functions</h3><span class="opt-tag">Warp-collective</span></div>
+      <div class="prose">
+        <p>A <code>fragment</code> isn't a normal array — it's a 16×16(×16) matrix tile whose storage is spread across the warp's 32 threads, hidden from you by the API. All four calls below must be executed by <b>every thread in the warp together</b> — that's what "_sync" means here, not "runs in the background."</p>
+      </div>
+      <div class="code-block"><span class="kw">fragment</span>&lt;role, M, N, K, dtype[, layout]&gt;   <span class="c">// role: accumulator | matrix_a | matrix_b</span>
+fill_fragment(frag, 0.0f)                <span class="c">// zero-init, like acc = 0</span>
+load_matrix_sync(frag, ptr, leadingDim)  <span class="c">// leadingDim = source array's row stride</span>
+mma_sync(out, aFrag, bFrag, out)         <span class="c">// out = aFrag*bFrag + out, ONE instruction</span>
+store_matrix_sync(ptr, frag, ld, layout) <span class="c">// mirror of load, writes back to memory</span></div>
+    </div>
+
+    <div class="opt-card">
+      <div class="opt-head"><h3>Blocking vs. non-blocking calls</h3><span class="opt-tag">cp.async pipeline</span></div>
+      <div class="prose">
+        <p>Only two calls in the double-buffered kernel are genuinely non-blocking: <code>__pipeline_memcpy_async</code> (fires the copy, returns immediately) and <code>__pipeline_commit</code> (just closes a batch marker). Everything else — <code>__pipeline_wait_prior</code>, <code>__syncthreads</code>, and all four <code>wmma::</code> calls above — blocks until it's actually done.</p>
+      </div>
+      <div class="opt-verdict"><b>The naming trap:</b> "_async" reliably means non-blocking. "_sync" does <i>not</i> mean the opposite — in <code>wmma</code>/warp context it means "every thread must call this together," and those calls still fully block. Don't infer async vs. blocking from the name alone; check the docs.</div>
+    </div>
+  </section>
+
+  <footer>
+    Companion notes to <a href="./gemm_report.html">gemm_report.html</a> — the full benchmark results, occupancy charts, and hardware specs live there.
+  </footer>
+
+</div>
+</body>
+</html>
